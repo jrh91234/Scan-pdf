@@ -202,6 +202,7 @@
             };
             state.cameraStream = await navigator.mediaDevices.getUserMedia(constraints);
             els.cameraFeed.srcObject = state.cameraStream;
+            startOrientationSensor();
         } catch (err) {
             showToast('Camera access denied');
             closeCamera();
@@ -209,6 +210,7 @@
     }
 
     function closeCamera() {
+        stopOrientationSensor();
         if (state.cameraStream) {
             state.cameraStream.getTracks().forEach(t => t.stop());
             state.cameraStream = null;
@@ -498,16 +500,138 @@
         showToast('Page saved');
     }
 
-    // ==================== Auto Deskew ====================
+    // ==================== Auto Deskew (Smart) ====================
+
+    function gaussianBlur(gray, w, h) {
+        const kernel = [1, 4, 6, 4, 1];
+        const kSum = 16;
+        const tmp = new Float32Array(w * h);
+        const out = new Float32Array(w * h);
+
+        // Horizontal pass
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let sum = 0;
+                for (let k = -2; k <= 2; k++) {
+                    const px = Math.min(w - 1, Math.max(0, x + k));
+                    sum += gray[y * w + px] * kernel[k + 2];
+                }
+                tmp[y * w + x] = sum / kSum;
+            }
+        }
+        // Vertical pass
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let sum = 0;
+                for (let k = -2; k <= 2; k++) {
+                    const py = Math.min(h - 1, Math.max(0, y + k));
+                    sum += tmp[py * w + x] * kernel[k + 2];
+                }
+                out[y * w + x] = sum / kSum;
+            }
+        }
+        return out;
+    }
+
+    function computeEdgesWithDirection(gray, w, h) {
+        const magnitude = new Float32Array(w * h);
+        const direction = new Float32Array(w * h);
+
+        for (let y = 1; y < h - 1; y++) {
+            for (let x = 1; x < w - 1; x++) {
+                const idx = y * w + x;
+                const gx = -gray[(y - 1) * w + (x - 1)] + gray[(y - 1) * w + (x + 1)]
+                         - 2 * gray[y * w + (x - 1)] + 2 * gray[y * w + (x + 1)]
+                         - gray[(y + 1) * w + (x - 1)] + gray[(y + 1) * w + (x + 1)];
+                const gy = -gray[(y - 1) * w + (x - 1)] - 2 * gray[(y - 1) * w + x] - gray[(y - 1) * w + (x + 1)]
+                         + gray[(y + 1) * w + (x - 1)] + 2 * gray[(y + 1) * w + x] + gray[(y + 1) * w + (x + 1)];
+                magnitude[idx] = Math.sqrt(gx * gx + gy * gy);
+                direction[idx] = Math.atan2(gy, gx);
+            }
+        }
+        return { magnitude, direction };
+    }
+
+    function nonMaxSuppression(magnitude, direction, w, h) {
+        const result = new Float32Array(w * h);
+        for (let y = 1; y < h - 1; y++) {
+            for (let x = 1; x < w - 1; x++) {
+                const idx = y * w + x;
+                const mag = magnitude[idx];
+                if (mag === 0) continue;
+
+                let angle = direction[idx] * (180 / Math.PI);
+                if (angle < 0) angle += 180;
+
+                let n1 = 0, n2 = 0;
+                if ((angle < 22.5) || (angle >= 157.5)) {
+                    n1 = magnitude[y * w + (x + 1)];
+                    n2 = magnitude[y * w + (x - 1)];
+                } else if (angle < 67.5) {
+                    n1 = magnitude[(y - 1) * w + (x + 1)];
+                    n2 = magnitude[(y + 1) * w + (x - 1)];
+                } else if (angle < 112.5) {
+                    n1 = magnitude[(y - 1) * w + x];
+                    n2 = magnitude[(y + 1) * w + x];
+                } else {
+                    n1 = magnitude[(y - 1) * w + (x - 1)];
+                    n2 = magnitude[(y + 1) * w + (x + 1)];
+                }
+
+                result[idx] = (mag >= n1 && mag >= n2) ? mag : 0;
+            }
+        }
+        return result;
+    }
+
+    function hysteresisThreshold(edges, w, h, lowRatio, highRatio) {
+        let maxVal = 0;
+        for (let i = 0; i < edges.length; i++) {
+            if (edges[i] > maxVal) maxVal = edges[i];
+        }
+        const high = maxVal * highRatio;
+        const low = maxVal * lowRatio;
+
+        const result = new Uint8Array(w * h);
+        for (let i = 0; i < edges.length; i++) {
+            if (edges[i] >= high) result[i] = 2;
+            else if (edges[i] >= low) result[i] = 1;
+        }
+
+        // Connect weak edges to strong edges
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (let y = 1; y < h - 1; y++) {
+                for (let x = 1; x < w - 1; x++) {
+                    const idx = y * w + x;
+                    if (result[idx] !== 1) continue;
+                    for (let dy = -1; dy <= 1; dy++) {
+                        for (let dx = -1; dx <= 1; dx++) {
+                            if (result[(y + dy) * w + (x + dx)] === 2) {
+                                result[idx] = 2;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        const final = new Uint8Array(w * h);
+        for (let i = 0; i < result.length; i++) {
+            final[i] = result[i] === 2 ? 255 : 0;
+        }
+        return final;
+    }
 
     function detectSkewAngle(canvas) {
-        const ctx = canvas.getContext('2d');
         const w = canvas.width;
         const h = canvas.height;
 
-        // Work on a smaller version for speed
-        const maxAnalysisSize = 600;
-        const scale = Math.min(1, maxAnalysisSize / Math.max(w, h));
+        // Downscale for analysis
+        const maxSize = 800;
+        const scale = Math.min(1, maxSize / Math.max(w, h));
         const sw = Math.round(w * scale);
         const sh = Math.round(h * scale);
 
@@ -520,120 +644,109 @@
         const imageData = tmpCtx.getImageData(0, 0, sw, sh);
         const data = imageData.data;
 
-        // Convert to grayscale
-        const gray = new Uint8Array(sw * sh);
-        for (let i = 0; i < gray.length; i++) {
+        // Grayscale
+        const rawGray = new Float32Array(sw * sh);
+        for (let i = 0; i < rawGray.length; i++) {
             const idx = i * 4;
-            gray[i] = Math.round(0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]);
+            rawGray[i] = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
         }
 
-        // Sobel edge detection (horizontal edges are most useful for text skew)
-        const edges = new Uint8Array(sw * sh);
-        for (let y = 1; y < sh - 1; y++) {
-            for (let x = 1; x < sw - 1; x++) {
-                const idx = y * sw + x;
-                // Sobel Y kernel (detects horizontal lines)
-                const gy = -gray[(y - 1) * sw + (x - 1)] - 2 * gray[(y - 1) * sw + x] - gray[(y - 1) * sw + (x + 1)]
-                         + gray[(y + 1) * sw + (x - 1)] + 2 * gray[(y + 1) * sw + x] + gray[(y + 1) * sw + (x + 1)];
-                // Sobel X kernel
-                const gx = -gray[(y - 1) * sw + (x - 1)] + gray[(y - 1) * sw + (x + 1)]
-                         - 2 * gray[y * sw + (x - 1)] + 2 * gray[y * sw + (x + 1)]
-                         - gray[(y + 1) * sw + (x - 1)] + gray[(y + 1) * sw + (x + 1)];
-                edges[idx] = Math.min(255, Math.sqrt(gx * gx + gy * gy));
-            }
-        }
+        // Gaussian blur to reduce noise
+        const gray = gaussianBlur(rawGray, sw, sh);
 
-        // Adaptive threshold for edge pixels
-        let edgeSum = 0, edgeCount = 0;
-        for (let i = 0; i < edges.length; i++) {
-            if (edges[i] > 0) { edgeSum += edges[i]; edgeCount++; }
-        }
-        const edgeThreshold = edgeCount > 0 ? (edgeSum / edgeCount) * 1.5 : 128;
+        // Canny-style edge detection
+        const { magnitude, direction } = computeEdgesWithDirection(gray, sw, sh);
+        const thinEdges = nonMaxSuppression(magnitude, direction, sw, sh);
+        const edges = hysteresisThreshold(thinEdges, sw, sh, 0.05, 0.15);
 
-        // Hough transform for angles near 0 degrees (skew detection)
-        // Only check angles from -15 to +15 degrees in 0.1 degree steps
-        const angleSteps = 301;
-        const minAngle = -15;
-        const maxAngle = 15;
-        const accumulator = new Float64Array(angleSteps);
-
-        const strongEdges = [];
-        for (let y = 0; y < sh; y++) {
-            for (let x = 0; x < sw; x++) {
-                if (edges[y * sw + x] > edgeThreshold) {
-                    strongEdges.push({ x, y });
+        // Collect edge points — prioritize near-horizontal edges (text lines)
+        const edgePoints = [];
+        for (let y = Math.round(sh * 0.05); y < Math.round(sh * 0.95); y++) {
+            for (let x = Math.round(sw * 0.05); x < Math.round(sw * 0.95); x++) {
+                if (edges[y * sw + x] === 0) continue;
+                const dir = direction[y * sw + x];
+                const absDeg = Math.abs(dir * 180 / Math.PI);
+                // Edges whose gradient is near-vertical → horizontal lines
+                if (absDeg > 60 && absDeg < 120) {
+                    edgePoints.push({ x, y, weight: 2.0 });
+                } else {
+                    edgePoints.push({ x, y, weight: 0.5 });
                 }
             }
         }
 
-        // Sample edges if too many (for performance)
-        const maxEdges = 5000;
-        let sampledEdges = strongEdges;
-        if (strongEdges.length > maxEdges) {
-            sampledEdges = [];
-            const step = strongEdges.length / maxEdges;
-            for (let i = 0; i < strongEdges.length; i += step) {
-                sampledEdges.push(strongEdges[Math.floor(i)]);
+        if (edgePoints.length < 20) return 0;
+
+        // Sample for performance
+        const maxPts = 8000;
+        let pts = edgePoints;
+        if (pts.length > maxPts) {
+            pts = [];
+            const step = edgePoints.length / maxPts;
+            for (let i = 0; i < edgePoints.length; i += step) {
+                pts.push(edgePoints[Math.floor(i)]);
             }
         }
 
         const cx = sw / 2;
         const cy = sh / 2;
 
-        for (let ai = 0; ai < angleSteps; ai++) {
-            const angleDeg = minAngle + (ai / (angleSteps - 1)) * (maxAngle - minAngle);
-            const angleRad = (angleDeg * Math.PI) / 180;
-            const cosA = Math.cos(angleRad);
-            const sinA = Math.sin(angleRad);
+        // Coarse sweep: -20° to +20° in 0.5° steps
+        const coarseAngles = [];
+        for (let a = -20; a <= 20; a += 0.5) coarseAngles.push(a);
 
-            for (const edge of sampledEdges) {
-                const rho = (edge.x - cx) * cosA + (edge.y - cy) * sinA;
-                const bin = Math.round(rho + Math.max(sw, sh));
-                accumulator[ai] += 1;
+        function projectionScore(angleDeg) {
+            const rad = (angleDeg * Math.PI) / 180;
+            const cosA = Math.cos(rad);
+            const sinA = Math.sin(rad);
+            const buckets = new Map();
+            for (const p of pts) {
+                const proj = Math.round((p.x - cx) * sinA - (p.y - cy) * cosA);
+                buckets.set(proj, (buckets.get(proj) || 0) + p.weight);
             }
+            // Entropy-based scoring: variance of bucket counts
+            let sum = 0, sumSq = 0, n = 0;
+            for (const c of buckets.values()) {
+                sum += c;
+                sumSq += c * c;
+                n++;
+            }
+            return n > 0 ? (sumSq / n) - (sum / n) * (sum / n) : 0;
         }
 
-        // Find peak using projection profile method
-        // Project all edge points onto lines at each angle candidate
-        const projectionScores = new Float64Array(angleSteps);
-
-        for (let ai = 0; ai < angleSteps; ai++) {
-            const angleDeg = minAngle + (ai / (angleSteps - 1)) * (maxAngle - minAngle);
-            const angleRad = (angleDeg * Math.PI) / 180;
-            const cosA = Math.cos(angleRad);
-            const sinA = Math.sin(angleRad);
-
-            // Project edge points onto perpendicular axis
-            const projections = new Map();
-            for (const edge of sampledEdges) {
-                const proj = Math.round((edge.x - cx) * sinA - (edge.y - cy) * cosA);
-                projections.set(proj, (projections.get(proj) || 0) + 1);
-            }
-
-            // Score = sum of squares of projection counts (sharper peaks = better alignment)
-            let score = 0;
-            for (const count of projections.values()) {
-                score += count * count;
-            }
-            projectionScores[ai] = score;
+        // Coarse pass
+        let bestAngle = 0;
+        let bestScore = -1;
+        for (const a of coarseAngles) {
+            const s = projectionScore(a);
+            if (s > bestScore) { bestScore = s; bestAngle = a; }
         }
 
-        // Find the angle with the highest score
-        let bestAngleIdx = 0;
-        let bestScore = 0;
-        for (let ai = 0; ai < angleSteps; ai++) {
-            if (projectionScores[ai] > bestScore) {
-                bestScore = projectionScores[ai];
-                bestAngleIdx = ai;
-            }
+        // Fine sweep: ±1° around best in 0.05° steps
+        let fineAngles = [];
+        for (let a = bestAngle - 1; a <= bestAngle + 1; a += 0.05) fineAngles.push(a);
+
+        for (const a of fineAngles) {
+            const s = projectionScore(a);
+            if (s > bestScore) { bestScore = s; bestAngle = a; }
         }
 
-        const detectedAngle = minAngle + (bestAngleIdx / (angleSteps - 1)) * (maxAngle - minAngle);
-        return detectedAngle;
+        // Sub-step parabolic interpolation
+        const step2 = 0.05;
+        const sLeft = projectionScore(bestAngle - step2);
+        const sCenter = projectionScore(bestAngle);
+        const sRight = projectionScore(bestAngle + step2);
+        const denom = sLeft - 2 * sCenter + sRight;
+        if (Math.abs(denom) > 1e-10) {
+            const delta = step2 * (sLeft - sRight) / (2 * denom);
+            if (Math.abs(delta) < step2) bestAngle += delta;
+        }
+
+        return Math.round(bestAngle * 100) / 100;
     }
 
     async function autoDeskew() {
-        showLoading('Detecting skew...');
+        showLoading('Analyzing document...');
         await new Promise(r => setTimeout(r, 50));
 
         try {
@@ -645,16 +758,15 @@
 
             const angle = detectSkewAngle(tmpCanvas);
 
-            if (Math.abs(angle) < 0.3) {
+            if (Math.abs(angle) < 0.2) {
                 hideLoading();
-                showToast('Document is already straight');
+                showToast('Document is already straight (±0.2°)');
                 return;
             }
 
-            els.loadingText.textContent = `Correcting ${angle.toFixed(1)}°...`;
+            els.loadingText.textContent = `Straightening ${angle.toFixed(2)}°...`;
             await new Promise(r => setTimeout(r, 50));
 
-            // Rotate to correct the skew
             const radians = (-angle * Math.PI) / 180;
             const cos = Math.abs(Math.cos(radians));
             const sin = Math.abs(Math.sin(radians));
@@ -668,21 +780,139 @@
 
             ctx.fillStyle = '#FFFFFF';
             ctx.fillRect(0, 0, newW, newH);
-
             ctx.translate(newW / 2, newH / 2);
             ctx.rotate(radians);
             ctx.drawImage(img, -img.width / 2, -img.height / 2);
 
-            state.originalImage = correctedCanvas.toDataURL('image/jpeg', 0.95);
-            state.rotation = 0;
+            // Auto-crop white borders after rotation
+            const cropData = ctx.getImageData(0, 0, newW, newH).data;
+            let minX = newW, maxX = 0, minY = newH, maxY = 0;
+            for (let y = 0; y < newH; y += 2) {
+                for (let x = 0; x < newW; x += 2) {
+                    const idx = (y * newW + x) * 4;
+                    if (cropData[idx] < 250 || cropData[idx + 1] < 250 || cropData[idx + 2] < 250) {
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
 
+            const pad = 4;
+            minX = Math.max(0, minX - pad);
+            minY = Math.max(0, minY - pad);
+            maxX = Math.min(newW, maxX + pad);
+            maxY = Math.min(newH, maxY + pad);
+            const cropW = maxX - minX;
+            const cropH = maxY - minY;
+
+            if (cropW > 50 && cropH > 50) {
+                const finalCanvas = document.createElement('canvas');
+                finalCanvas.width = cropW;
+                finalCanvas.height = cropH;
+                finalCanvas.getContext('2d').drawImage(correctedCanvas, minX, minY, cropW, cropH, 0, 0, cropW, cropH);
+                state.originalImage = finalCanvas.toDataURL('image/jpeg', 0.95);
+            } else {
+                state.originalImage = correctedCanvas.toDataURL('image/jpeg', 0.95);
+            }
+
+            state.rotation = 0;
             hideLoading();
             renderEditor();
-            showToast(`Corrected ${Math.abs(angle).toFixed(1)}° skew`);
+            showToast(`Corrected ${Math.abs(angle).toFixed(2)}° skew`);
         } catch (err) {
             hideLoading();
             showToast('Failed to detect skew');
             console.error('Deskew error:', err);
+        }
+    }
+
+    // ==================== Orientation Sensor ====================
+
+    let orientationHandler = null;
+
+    function startOrientationSensor() {
+        const gauge = $('#orientationGauge');
+        const bubble = $('#levelBubble');
+        const axisX = $('#axisX');
+        const axisY = $('#axisY');
+        const axisZ = $('#axisZ');
+        const warning = $('#tiltWarning');
+
+        if (!gauge) return;
+
+        // Request permission on iOS 13+
+        if (typeof DeviceOrientationEvent !== 'undefined' &&
+            typeof DeviceOrientationEvent.requestPermission === 'function') {
+            DeviceOrientationEvent.requestPermission().then(perm => {
+                if (perm === 'granted') bindOrientation();
+                else gauge.classList.add('hidden');
+            }).catch(() => gauge.classList.add('hidden'));
+        } else if ('DeviceOrientationEvent' in window) {
+            bindOrientation();
+        } else {
+            gauge.classList.add('hidden');
+        }
+
+        function bindOrientation() {
+            orientationHandler = (e) => {
+                // beta = X (front-back tilt), gamma = Y (left-right tilt), alpha = Z (compass)
+                const beta = e.beta ?? 0;   // -180 to 180 (X: front/back)
+                const gamma = e.gamma ?? 0; // -90 to 90  (Y: left/right)
+                const alpha = e.alpha ?? 0; // 0 to 360   (Z: compass heading)
+
+                // For document scanning, phone is typically held ~vertical (beta ≈ 90)
+                // X tilt = deviation from vertical (beta - 90)
+                // Y tilt = left/right lean (gamma)
+                const xTilt = beta - 90;
+                const yTilt = gamma;
+                const zRotation = alpha;
+
+                axisX.textContent = xTilt.toFixed(1) + '°';
+                axisY.textContent = yTilt.toFixed(1) + '°';
+                axisZ.textContent = zRotation.toFixed(1) + '°';
+
+                // Color-code values
+                colorAxis(axisX, Math.abs(xTilt), 5, 15);
+                colorAxis(axisY, Math.abs(yTilt), 3, 10);
+
+                // Level bubble position: map gamma (-45..+45) to bubble position
+                const bubblePos = 50 + Math.max(-50, Math.min(50, yTilt * (50 / 30)));
+                bubble.style.left = bubblePos + '%';
+
+                // Bubble color
+                const totalTilt = Math.sqrt(xTilt * xTilt + yTilt * yTilt);
+                bubble.classList.remove('warning', 'danger');
+                if (totalTilt > 10) {
+                    bubble.classList.add('danger');
+                    warning.classList.remove('hidden');
+                } else if (totalTilt > 4) {
+                    bubble.classList.add('warning');
+                    warning.classList.add('hidden');
+                } else {
+                    warning.classList.add('hidden');
+                }
+            };
+
+            window.addEventListener('deviceorientation', orientationHandler);
+        }
+
+        function colorAxis(el, absVal, warnThreshold, dangerThreshold) {
+            if (absVal > dangerThreshold) {
+                el.style.color = '#EF4444';
+            } else if (absVal > warnThreshold) {
+                el.style.color = '#FBBF24';
+            } else {
+                el.style.color = '#4ADE80';
+            }
+        }
+    }
+
+    function stopOrientationSensor() {
+        if (orientationHandler) {
+            window.removeEventListener('deviceorientation', orientationHandler);
+            orientationHandler = null;
         }
     }
 
