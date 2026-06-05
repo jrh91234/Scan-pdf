@@ -190,10 +190,22 @@
     // ==================== Camera ====================
 
     async function openCamera() {
-        // Request orientation permission FIRST while still in user gesture context (iOS requirement)
-        await requestOrientationPermission();
-
         els.cameraView.classList.remove('hidden');
+
+        // Request orientation permission while still in user gesture context (iOS requirement).
+        // Must happen BEFORE any other await, and must not block camera if it fails.
+        const needsOrientationPermission =
+            typeof DeviceOrientationEvent !== 'undefined' &&
+            typeof DeviceOrientationEvent.requestPermission === 'function';
+
+        if (needsOrientationPermission) {
+            try {
+                await DeviceOrientationEvent.requestPermission();
+            } catch {
+                // Permission denied or failed — gauge will auto-hide via timeout
+            }
+        }
+
         try {
             const constraints = {
                 video: {
@@ -834,103 +846,85 @@
     // ==================== Orientation Sensor ====================
 
     let orientationHandler = null;
-    let orientationPermission = 'unknown'; // 'unknown' | 'granted' | 'denied' | 'not-needed'
-
-    async function requestOrientationPermission() {
-        if (orientationPermission === 'granted' || orientationPermission === 'not-needed') return true;
-
-        if (typeof DeviceOrientationEvent !== 'undefined' &&
-            typeof DeviceOrientationEvent.requestPermission === 'function') {
-            try {
-                const perm = await DeviceOrientationEvent.requestPermission();
-                orientationPermission = perm === 'granted' ? 'granted' : 'denied';
-                return orientationPermission === 'granted';
-            } catch {
-                orientationPermission = 'denied';
-                return false;
-            }
-        } else if ('DeviceOrientationEvent' in window) {
-            orientationPermission = 'not-needed';
-            return true;
-        }
-        orientationPermission = 'denied';
-        return false;
-    }
+    let orientationAvailable = null; // null = not tested, true/false
+    let orientationCheckTimer = null;
 
     function startOrientationSensor() {
         const gauge = $('#orientationGauge');
+        if (!gauge) return;
+
+        // Always show gauge initially, hide only if no data arrives
+        gauge.classList.remove('hidden');
+
         const bubble = $('#levelBubble');
         const axisX = $('#axisX');
         const axisY = $('#axisY');
         const axisZ = $('#axisZ');
         const warning = $('#tiltWarning');
+        let receivedData = false;
 
-        if (!gauge) return;
-        gauge.classList.remove('hidden');
+        stopOrientationSensor();
 
-        if (orientationPermission === 'denied') {
-            gauge.classList.add('hidden');
-            return;
-        }
+        orientationHandler = (e) => {
+            if (e.beta === null && e.gamma === null && e.alpha === null) return;
+            receivedData = true;
+            orientationAvailable = true;
 
-        if (orientationPermission === 'unknown') {
-            gauge.classList.add('hidden');
-            return;
-        }
+            const beta = e.beta ?? 0;
+            const gamma = e.gamma ?? 0;
+            const alpha = e.alpha ?? 0;
 
-        bindOrientation();
+            const xTilt = beta - 90;
+            const yTilt = gamma;
 
-        function bindOrientation() {
-            orientationHandler = (e) => {
-                const beta = e.beta ?? 0;
-                const gamma = e.gamma ?? 0;
-                const alpha = e.alpha ?? 0;
+            axisX.textContent = xTilt.toFixed(1) + '°';
+            axisY.textContent = yTilt.toFixed(1) + '°';
+            axisZ.textContent = alpha.toFixed(1) + '°';
 
-                const xTilt = beta - 90;
-                const yTilt = gamma;
-                const zRotation = alpha;
+            colorAxis(axisX, Math.abs(xTilt), 5, 15);
+            colorAxis(axisY, Math.abs(yTilt), 3, 10);
 
-                axisX.textContent = xTilt.toFixed(1) + '°';
-                axisY.textContent = yTilt.toFixed(1) + '°';
-                axisZ.textContent = zRotation.toFixed(1) + '°';
+            const bubblePos = 50 + Math.max(-50, Math.min(50, yTilt * (50 / 30)));
+            bubble.style.left = bubblePos + '%';
 
-                colorAxis(axisX, Math.abs(xTilt), 5, 15);
-                colorAxis(axisY, Math.abs(yTilt), 3, 10);
+            const totalTilt = Math.sqrt(xTilt * xTilt + yTilt * yTilt);
+            bubble.classList.remove('warning', 'danger');
+            if (totalTilt > 10) {
+                bubble.classList.add('danger');
+                warning.classList.remove('hidden');
+            } else if (totalTilt > 4) {
+                bubble.classList.add('warning');
+                warning.classList.add('hidden');
+            } else {
+                warning.classList.add('hidden');
+            }
+        };
 
-                const bubblePos = 50 + Math.max(-50, Math.min(50, yTilt * (50 / 30)));
-                bubble.style.left = bubblePos + '%';
+        window.addEventListener('deviceorientation', orientationHandler, true);
 
-                const totalTilt = Math.sqrt(xTilt * xTilt + yTilt * yTilt);
-                bubble.classList.remove('warning', 'danger');
-                if (totalTilt > 10) {
-                    bubble.classList.add('danger');
-                    warning.classList.remove('hidden');
-                } else if (totalTilt > 4) {
-                    bubble.classList.add('warning');
-                    warning.classList.add('hidden');
-                } else {
-                    warning.classList.add('hidden');
-                }
-            };
-
-            window.addEventListener('deviceorientation', orientationHandler);
-        }
+        // If no data within 3 seconds, sensor is not available — hide gauge
+        orientationCheckTimer = setTimeout(() => {
+            if (!receivedData) {
+                orientationAvailable = false;
+                gauge.classList.add('hidden');
+            }
+        }, 3000);
 
         function colorAxis(el, absVal, warnThreshold, dangerThreshold) {
-            if (absVal > dangerThreshold) {
-                el.style.color = '#EF4444';
-            } else if (absVal > warnThreshold) {
-                el.style.color = '#FBBF24';
-            } else {
-                el.style.color = '#4ADE80';
-            }
+            if (absVal > dangerThreshold) el.style.color = '#EF4444';
+            else if (absVal > warnThreshold) el.style.color = '#FBBF24';
+            else el.style.color = '#4ADE80';
         }
     }
 
     function stopOrientationSensor() {
         if (orientationHandler) {
-            window.removeEventListener('deviceorientation', orientationHandler);
+            window.removeEventListener('deviceorientation', orientationHandler, true);
             orientationHandler = null;
+        }
+        if (orientationCheckTimer) {
+            clearTimeout(orientationCheckTimer);
+            orientationCheckTimer = null;
         }
     }
 
