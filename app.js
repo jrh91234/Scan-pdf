@@ -669,7 +669,19 @@
     }
 
     async function exportPDF() {
-        const { jsPDF } = window.jspdf;
+        if (!state.pages.length) {
+            showToast('No pages to export');
+            return;
+        }
+
+        let jsPDFClass;
+        try {
+            jsPDFClass = window.jspdf.jsPDF;
+        } catch (e) {
+            showToast('PDF library not loaded. Check your internet connection.');
+            return;
+        }
+
         const name = els.pdfName.value.trim() || 'Scanned Document';
         const pageSize = document.querySelector('input[name="pageSize"]:checked').value;
         const orientation = document.querySelector('input[name="orientation"]:checked').value;
@@ -677,16 +689,21 @@
 
         const qualityMap = { low: 0.5, medium: 0.75, high: 0.92 };
         const jpegQuality = qualityMap[quality];
+        const maxDim = quality === 'high' ? 3000 : quality === 'medium' ? 2000 : 1200;
 
         els.exportModal.classList.add('hidden');
         showLoading('Generating PDF...');
 
+        // Use setTimeout to let the UI update before heavy processing
+        await new Promise(r => setTimeout(r, 100));
+
         try {
-            const pdf = new jsPDF({ orientation, unit: 'mm', format: pageSize });
+            const pdf = new jsPDFClass({ orientation, unit: 'mm', format: pageSize });
 
             for (let i = 0; i < state.pages.length; i++) {
                 if (i > 0) pdf.addPage();
                 els.loadingText.textContent = `Processing page ${i + 1}/${state.pages.length}...`;
+                await new Promise(r => setTimeout(r, 50));
 
                 const img = await loadImage(state.pages[i].fullImage);
                 const pageWidth = pdf.internal.pageSize.getWidth();
@@ -710,19 +727,15 @@
                 const x = margin + (availW - drawW) / 2;
                 const y = margin + (availH - drawH) / 2;
 
-                // Resize image for PDF to avoid memory issues with very large images
-                const maxDim = quality === 'high' ? 3000 : quality === 'medium' ? 2000 : 1200;
-                let imgData = state.pages[i].fullImage;
-                if (img.width > maxDim || img.height > maxDim) {
-                    const scale = maxDim / Math.max(img.width, img.height);
-                    const tmpCanvas = document.createElement('canvas');
-                    tmpCanvas.width = Math.round(img.width * scale);
-                    tmpCanvas.height = Math.round(img.height * scale);
-                    tmpCanvas.getContext('2d').drawImage(img, 0, 0, tmpCanvas.width, tmpCanvas.height);
-                    imgData = tmpCanvas.toDataURL('image/jpeg', jpegQuality);
-                }
+                // Always re-render through canvas to ensure consistent JPEG format
+                const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+                const tmpCanvas = document.createElement('canvas');
+                tmpCanvas.width = Math.round(img.width * scale);
+                tmpCanvas.height = Math.round(img.height * scale);
+                tmpCanvas.getContext('2d').drawImage(img, 0, 0, tmpCanvas.width, tmpCanvas.height);
+                const imgData = tmpCanvas.toDataURL('image/jpeg', jpegQuality);
 
-                pdf.addImage(imgData, 'JPEG', x, y, drawW, drawH, undefined, 'FAST', 0);
+                pdf.addImage(imgData, 'JPEG', x, y, drawW, drawH);
             }
 
             pdf.save(`${name}.pdf`);
@@ -730,8 +743,8 @@
             showToast('PDF saved successfully!');
         } catch (err) {
             hideLoading();
-            showToast('Failed to generate PDF');
-            console.error(err);
+            showToast('Failed to generate PDF: ' + err.message);
+            console.error('Export error:', err);
         }
     }
 
@@ -883,13 +896,20 @@
             return;
         }
 
-        const { jsPDF } = window.jspdf;
+        let jsPDFClass;
+        try {
+            jsPDFClass = window.jspdf.jsPDF;
+        } catch (e) {
+            showToast('PDF library not loaded');
+            return;
+        }
+
         const name = els.pdfName.value.trim() || 'Scanned Document';
         els.exportModal.classList.add('hidden');
         showLoading('Preparing to share...');
 
         try {
-            const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+            const pdf = new jsPDFClass({ orientation: 'portrait', unit: 'mm', format: 'a4' });
             for (let i = 0; i < state.pages.length; i++) {
                 if (i > 0) pdf.addPage();
                 const img = await loadImage(state.pages[i].fullImage);
@@ -898,7 +918,14 @@
                 const r = Math.min(pw / img.width, ph / img.height);
                 const w = img.width * r;
                 const h = img.height * r;
-                pdf.addImage(state.pages[i].fullImage, 'JPEG', 5 + (pw - w) / 2, 5 + (ph - h) / 2, w, h);
+
+                const tmpCanvas = document.createElement('canvas');
+                tmpCanvas.width = Math.min(img.width, 2000);
+                tmpCanvas.height = Math.round(tmpCanvas.width * (img.height / img.width));
+                tmpCanvas.getContext('2d').drawImage(img, 0, 0, tmpCanvas.width, tmpCanvas.height);
+                const imgData = tmpCanvas.toDataURL('image/jpeg', 0.75);
+
+                pdf.addImage(imgData, 'JPEG', 5 + (pw - w) / 2, 5 + (ph - h) / 2, w, h);
             }
 
             const blob = pdf.output('blob');
@@ -908,7 +935,7 @@
         } catch (err) {
             hideLoading();
             if (err.name !== 'AbortError') {
-                showToast('Share failed');
+                showToast('Share failed: ' + err.message);
             }
         }
     });
