@@ -515,12 +515,12 @@
         canvas.height = srcCanvas.height * scale;
         ctx.drawImage(srcCanvas, 0, 0, canvas.width, canvas.height);
 
-        const margin = 20;
+        // cropState uses percentages (0-1) relative to the canvas internal size
         cropState = {
-            x: margin,
-            y: margin,
-            w: canvas.width - margin * 2,
-            h: canvas.height - margin * 2,
+            x: 0.05,
+            y: 0.05,
+            w: 0.9,
+            h: 0.9,
         };
         updateCropBox();
     }
@@ -528,12 +528,24 @@
     function updateCropBox() {
         const canvas = els.cropCanvas;
         const rect = canvas.getBoundingClientRect();
+        const wrapper = $('.crop-canvas-wrapper');
+        const wrapperRect = wrapper.getBoundingClientRect();
         const box = els.cropBox;
 
-        box.style.left = (rect.left + cropState.x) + 'px';
-        box.style.top = (rect.top + cropState.y) + 'px';
-        box.style.width = cropState.w + 'px';
-        box.style.height = cropState.h + 'px';
+        // Canvas offset relative to wrapper
+        const offsetX = rect.left - wrapperRect.left;
+        const offsetY = rect.top - wrapperRect.top;
+
+        // Convert percentage crop state to pixel positions on the displayed canvas
+        const pxX = cropState.x * rect.width;
+        const pxY = cropState.y * rect.height;
+        const pxW = cropState.w * rect.width;
+        const pxH = cropState.h * rect.height;
+
+        box.style.left = (offsetX + pxX) + 'px';
+        box.style.top = (offsetY + pxY) + 'px';
+        box.style.width = pxW + 'px';
+        box.style.height = pxH + 'px';
     }
 
     function initCropHandlers() {
@@ -561,14 +573,17 @@
             if (!cropState.dragging) return;
             e.preventDefault();
             const pos = getPos(e);
-            const dx = pos.x - cropState.startX;
-            const dy = pos.y - cropState.startY;
             const canvas = els.cropCanvas;
-            const minSize = 40;
+            const rect = canvas.getBoundingClientRect();
+
+            // Convert pixel deltas to percentage of displayed canvas
+            const dx = (pos.x - cropState.startX) / rect.width;
+            const dy = (pos.y - cropState.startY) / rect.height;
+            const minSize = 0.05; // 5% minimum
 
             if (cropState.dragging === 'move') {
-                cropState.x = Math.max(0, Math.min(canvas.width - cropState.w, cropState.origX + dx));
-                cropState.y = Math.max(0, Math.min(canvas.height - cropState.h, cropState.origY + dy));
+                cropState.x = Math.max(0, Math.min(1 - cropState.w, cropState.origX + dx));
+                cropState.y = Math.max(0, Math.min(1 - cropState.h, cropState.origY + dy));
             } else if (cropState.dragging === 'top-left') {
                 const newX = Math.max(0, cropState.origX + dx);
                 const newY = Math.max(0, cropState.origY + dy);
@@ -578,17 +593,17 @@
                 cropState.y = cropState.origY + cropState.origH - cropState.h;
             } else if (cropState.dragging === 'top-right') {
                 const newY = Math.max(0, cropState.origY + dy);
-                cropState.w = Math.max(minSize, Math.min(canvas.width - cropState.x, cropState.origW + dx));
+                cropState.w = Math.max(minSize, Math.min(1 - cropState.x, cropState.origW + dx));
                 cropState.h = Math.max(minSize, cropState.origH - (newY - cropState.origY));
                 cropState.y = cropState.origY + cropState.origH - cropState.h;
             } else if (cropState.dragging === 'bottom-left') {
                 const newX = Math.max(0, cropState.origX + dx);
                 cropState.w = Math.max(minSize, cropState.origW - (newX - cropState.origX));
-                cropState.h = Math.max(minSize, Math.min(canvas.height - cropState.y, cropState.origH + dy));
+                cropState.h = Math.max(minSize, Math.min(1 - cropState.y, cropState.origH + dy));
                 cropState.x = cropState.origX + cropState.origW - cropState.w;
             } else if (cropState.dragging === 'bottom-right') {
-                cropState.w = Math.max(minSize, Math.min(canvas.width - cropState.x, cropState.origW + dx));
-                cropState.h = Math.max(minSize, Math.min(canvas.height - cropState.y, cropState.origH + dy));
+                cropState.w = Math.max(minSize, Math.min(1 - cropState.x, cropState.origW + dx));
+                cropState.h = Math.max(minSize, Math.min(1 - cropState.y, cropState.origH + dy));
             }
 
             updateCropBox();
@@ -620,14 +635,11 @@
     }
 
     function applyCrop() {
-        const canvas = els.cropCanvas;
-        const scaleX = els.editorCanvas.width / canvas.width;
-        const scaleY = els.editorCanvas.height / canvas.height;
-
-        const sx = cropState.x * scaleX;
-        const sy = cropState.y * scaleY;
-        const sw = cropState.w * scaleX;
-        const sh = cropState.h * scaleY;
+        // cropState is in percentages (0-1), map directly to editor canvas pixels
+        const sx = cropState.x * els.editorCanvas.width;
+        const sy = cropState.y * els.editorCanvas.height;
+        const sw = cropState.w * els.editorCanvas.width;
+        const sh = cropState.h * els.editorCanvas.height;
 
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = sw;
@@ -812,19 +824,20 @@
             if (state.cropRatio !== 'free') {
                 const [rw, rh] = state.cropRatio.split(':').map(Number);
                 const canvas = els.cropCanvas;
-                const maxW = canvas.width - 40;
-                const maxH = canvas.height - 40;
-                const ratio = rw / rh;
+                const rect = canvas.getBoundingClientRect();
+                const canvasAspect = rect.width / rect.height;
+                const targetRatio = rw / rh;
+                const maxPct = 0.9;
 
-                if (maxW / maxH > ratio) {
-                    cropState.h = maxH;
-                    cropState.w = maxH * ratio;
+                if (canvasAspect > targetRatio) {
+                    cropState.h = maxPct;
+                    cropState.w = maxPct * targetRatio / canvasAspect;
                 } else {
-                    cropState.w = maxW;
-                    cropState.h = maxW / ratio;
+                    cropState.w = maxPct;
+                    cropState.h = maxPct * canvasAspect / targetRatio;
                 }
-                cropState.x = (canvas.width - cropState.w) / 2;
-                cropState.y = (canvas.height - cropState.h) / 2;
+                cropState.x = (1 - cropState.w) / 2;
+                cropState.y = (1 - cropState.h) / 2;
                 updateCropBox();
             }
         });

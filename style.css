@@ -779,6 +779,10 @@ body {
     padding: 20px;
 }
 
+.crop-box {
+    position: absolute;
+}
+
 #cropCanvas {
     max-width: 100%;
     max-height: 100%;
