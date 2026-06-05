@@ -77,6 +77,32 @@
                 <div class="scan-overlay">
                     <div class="scan-frame"></div>
                 </div>
+
+                <!-- Orientation Gauge -->
+                <div id="orientationGauge" class="orientation-gauge">
+                    <div class="gauge-level">
+                        <div class="level-line"></div>
+                        <div id="levelBubble" class="level-bubble"></div>
+                        <div class="level-center"></div>
+                    </div>
+                    <div class="gauge-readings">
+                        <div class="gauge-axis">
+                            <span class="axis-label">X</span>
+                            <span id="axisX" class="axis-value">0.0°</span>
+                        </div>
+                        <div class="gauge-axis">
+                            <span class="axis-label">Y</span>
+                            <span id="axisY" class="axis-value">0.0°</span>
+                        </div>
+                        <div class="gauge-axis">
+                            <span class="axis-label">Z</span>
+                            <span id="axisZ" class="axis-value">0.0°</span>
+                        </div>
+                    </div>
+                    <div id="tiltWarning" class="tilt-warning hidden">
+                        <i class="fas fa-exclamation-triangle"></i> Tilted
+                    </div>
+                </div>
             </div>
             <div class="camera-controls">
                 <button id="btnSwitchCamera" class="icon-btn light" title="Switch camera">
