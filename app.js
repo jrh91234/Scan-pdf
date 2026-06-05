@@ -498,6 +498,194 @@
         showToast('Page saved');
     }
 
+    // ==================== Auto Deskew ====================
+
+    function detectSkewAngle(canvas) {
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width;
+        const h = canvas.height;
+
+        // Work on a smaller version for speed
+        const maxAnalysisSize = 600;
+        const scale = Math.min(1, maxAnalysisSize / Math.max(w, h));
+        const sw = Math.round(w * scale);
+        const sh = Math.round(h * scale);
+
+        const tmpCanvas = document.createElement('canvas');
+        tmpCanvas.width = sw;
+        tmpCanvas.height = sh;
+        const tmpCtx = tmpCanvas.getContext('2d');
+        tmpCtx.drawImage(canvas, 0, 0, sw, sh);
+
+        const imageData = tmpCtx.getImageData(0, 0, sw, sh);
+        const data = imageData.data;
+
+        // Convert to grayscale
+        const gray = new Uint8Array(sw * sh);
+        for (let i = 0; i < gray.length; i++) {
+            const idx = i * 4;
+            gray[i] = Math.round(0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]);
+        }
+
+        // Sobel edge detection (horizontal edges are most useful for text skew)
+        const edges = new Uint8Array(sw * sh);
+        for (let y = 1; y < sh - 1; y++) {
+            for (let x = 1; x < sw - 1; x++) {
+                const idx = y * sw + x;
+                // Sobel Y kernel (detects horizontal lines)
+                const gy = -gray[(y - 1) * sw + (x - 1)] - 2 * gray[(y - 1) * sw + x] - gray[(y - 1) * sw + (x + 1)]
+                         + gray[(y + 1) * sw + (x - 1)] + 2 * gray[(y + 1) * sw + x] + gray[(y + 1) * sw + (x + 1)];
+                // Sobel X kernel
+                const gx = -gray[(y - 1) * sw + (x - 1)] + gray[(y - 1) * sw + (x + 1)]
+                         - 2 * gray[y * sw + (x - 1)] + 2 * gray[y * sw + (x + 1)]
+                         - gray[(y + 1) * sw + (x - 1)] + gray[(y + 1) * sw + (x + 1)];
+                edges[idx] = Math.min(255, Math.sqrt(gx * gx + gy * gy));
+            }
+        }
+
+        // Adaptive threshold for edge pixels
+        let edgeSum = 0, edgeCount = 0;
+        for (let i = 0; i < edges.length; i++) {
+            if (edges[i] > 0) { edgeSum += edges[i]; edgeCount++; }
+        }
+        const edgeThreshold = edgeCount > 0 ? (edgeSum / edgeCount) * 1.5 : 128;
+
+        // Hough transform for angles near 0 degrees (skew detection)
+        // Only check angles from -15 to +15 degrees in 0.1 degree steps
+        const angleSteps = 301;
+        const minAngle = -15;
+        const maxAngle = 15;
+        const accumulator = new Float64Array(angleSteps);
+
+        const strongEdges = [];
+        for (let y = 0; y < sh; y++) {
+            for (let x = 0; x < sw; x++) {
+                if (edges[y * sw + x] > edgeThreshold) {
+                    strongEdges.push({ x, y });
+                }
+            }
+        }
+
+        // Sample edges if too many (for performance)
+        const maxEdges = 5000;
+        let sampledEdges = strongEdges;
+        if (strongEdges.length > maxEdges) {
+            sampledEdges = [];
+            const step = strongEdges.length / maxEdges;
+            for (let i = 0; i < strongEdges.length; i += step) {
+                sampledEdges.push(strongEdges[Math.floor(i)]);
+            }
+        }
+
+        const cx = sw / 2;
+        const cy = sh / 2;
+
+        for (let ai = 0; ai < angleSteps; ai++) {
+            const angleDeg = minAngle + (ai / (angleSteps - 1)) * (maxAngle - minAngle);
+            const angleRad = (angleDeg * Math.PI) / 180;
+            const cosA = Math.cos(angleRad);
+            const sinA = Math.sin(angleRad);
+
+            for (const edge of sampledEdges) {
+                const rho = (edge.x - cx) * cosA + (edge.y - cy) * sinA;
+                const bin = Math.round(rho + Math.max(sw, sh));
+                accumulator[ai] += 1;
+            }
+        }
+
+        // Find peak using projection profile method
+        // Project all edge points onto lines at each angle candidate
+        const projectionScores = new Float64Array(angleSteps);
+
+        for (let ai = 0; ai < angleSteps; ai++) {
+            const angleDeg = minAngle + (ai / (angleSteps - 1)) * (maxAngle - minAngle);
+            const angleRad = (angleDeg * Math.PI) / 180;
+            const cosA = Math.cos(angleRad);
+            const sinA = Math.sin(angleRad);
+
+            // Project edge points onto perpendicular axis
+            const projections = new Map();
+            for (const edge of sampledEdges) {
+                const proj = Math.round((edge.x - cx) * sinA - (edge.y - cy) * cosA);
+                projections.set(proj, (projections.get(proj) || 0) + 1);
+            }
+
+            // Score = sum of squares of projection counts (sharper peaks = better alignment)
+            let score = 0;
+            for (const count of projections.values()) {
+                score += count * count;
+            }
+            projectionScores[ai] = score;
+        }
+
+        // Find the angle with the highest score
+        let bestAngleIdx = 0;
+        let bestScore = 0;
+        for (let ai = 0; ai < angleSteps; ai++) {
+            if (projectionScores[ai] > bestScore) {
+                bestScore = projectionScores[ai];
+                bestAngleIdx = ai;
+            }
+        }
+
+        const detectedAngle = minAngle + (bestAngleIdx / (angleSteps - 1)) * (maxAngle - minAngle);
+        return detectedAngle;
+    }
+
+    async function autoDeskew() {
+        showLoading('Detecting skew...');
+        await new Promise(r => setTimeout(r, 50));
+
+        try {
+            const img = await loadImage(state.originalImage);
+            const tmpCanvas = document.createElement('canvas');
+            tmpCanvas.width = img.width;
+            tmpCanvas.height = img.height;
+            tmpCanvas.getContext('2d').drawImage(img, 0, 0);
+
+            const angle = detectSkewAngle(tmpCanvas);
+
+            if (Math.abs(angle) < 0.3) {
+                hideLoading();
+                showToast('Document is already straight');
+                return;
+            }
+
+            els.loadingText.textContent = `Correcting ${angle.toFixed(1)}°...`;
+            await new Promise(r => setTimeout(r, 50));
+
+            // Rotate to correct the skew
+            const radians = (-angle * Math.PI) / 180;
+            const cos = Math.abs(Math.cos(radians));
+            const sin = Math.abs(Math.sin(radians));
+            const newW = Math.round(img.width * cos + img.height * sin);
+            const newH = Math.round(img.width * sin + img.height * cos);
+
+            const correctedCanvas = document.createElement('canvas');
+            correctedCanvas.width = newW;
+            correctedCanvas.height = newH;
+            const ctx = correctedCanvas.getContext('2d');
+
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, newW, newH);
+
+            ctx.translate(newW / 2, newH / 2);
+            ctx.rotate(radians);
+            ctx.drawImage(img, -img.width / 2, -img.height / 2);
+
+            state.originalImage = correctedCanvas.toDataURL('image/jpeg', 0.95);
+            state.rotation = 0;
+
+            hideLoading();
+            renderEditor();
+            showToast(`Corrected ${Math.abs(angle).toFixed(1)}° skew`);
+        } catch (err) {
+            hideLoading();
+            showToast('Failed to detect skew');
+            console.error('Deskew error:', err);
+        }
+    }
+
     // ==================== Crop ====================
 
     let cropState = { x: 0, y: 0, w: 0, h: 0, dragging: null, startX: 0, startY: 0 };
@@ -798,6 +986,8 @@
     });
 
     // Tools
+    $('#btnDeskew').addEventListener('click', autoDeskew);
+
     $('#btnRotateLeft').addEventListener('click', () => {
         state.rotation = (state.rotation - 90 + 360) % 360;
         renderEditor();
