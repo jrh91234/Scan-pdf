@@ -190,6 +190,9 @@
     // ==================== Camera ====================
 
     async function openCamera() {
+        // Request orientation permission FIRST while still in user gesture context (iOS requirement)
+        await requestOrientationPermission();
+
         els.cameraView.classList.remove('hidden');
         try {
             const constraints = {
@@ -831,6 +834,28 @@
     // ==================== Orientation Sensor ====================
 
     let orientationHandler = null;
+    let orientationPermission = 'unknown'; // 'unknown' | 'granted' | 'denied' | 'not-needed'
+
+    async function requestOrientationPermission() {
+        if (orientationPermission === 'granted' || orientationPermission === 'not-needed') return true;
+
+        if (typeof DeviceOrientationEvent !== 'undefined' &&
+            typeof DeviceOrientationEvent.requestPermission === 'function') {
+            try {
+                const perm = await DeviceOrientationEvent.requestPermission();
+                orientationPermission = perm === 'granted' ? 'granted' : 'denied';
+                return orientationPermission === 'granted';
+            } catch {
+                orientationPermission = 'denied';
+                return false;
+            }
+        } else if ('DeviceOrientationEvent' in window) {
+            orientationPermission = 'not-needed';
+            return true;
+        }
+        orientationPermission = 'denied';
+        return false;
+    }
 
     function startOrientationSensor() {
         const gauge = $('#orientationGauge');
@@ -841,30 +866,26 @@
         const warning = $('#tiltWarning');
 
         if (!gauge) return;
+        gauge.classList.remove('hidden');
 
-        // Request permission on iOS 13+
-        if (typeof DeviceOrientationEvent !== 'undefined' &&
-            typeof DeviceOrientationEvent.requestPermission === 'function') {
-            DeviceOrientationEvent.requestPermission().then(perm => {
-                if (perm === 'granted') bindOrientation();
-                else gauge.classList.add('hidden');
-            }).catch(() => gauge.classList.add('hidden'));
-        } else if ('DeviceOrientationEvent' in window) {
-            bindOrientation();
-        } else {
+        if (orientationPermission === 'denied') {
             gauge.classList.add('hidden');
+            return;
         }
+
+        if (orientationPermission === 'unknown') {
+            gauge.classList.add('hidden');
+            return;
+        }
+
+        bindOrientation();
 
         function bindOrientation() {
             orientationHandler = (e) => {
-                // beta = X (front-back tilt), gamma = Y (left-right tilt), alpha = Z (compass)
-                const beta = e.beta ?? 0;   // -180 to 180 (X: front/back)
-                const gamma = e.gamma ?? 0; // -90 to 90  (Y: left/right)
-                const alpha = e.alpha ?? 0; // 0 to 360   (Z: compass heading)
+                const beta = e.beta ?? 0;
+                const gamma = e.gamma ?? 0;
+                const alpha = e.alpha ?? 0;
 
-                // For document scanning, phone is typically held ~vertical (beta ≈ 90)
-                // X tilt = deviation from vertical (beta - 90)
-                // Y tilt = left/right lean (gamma)
                 const xTilt = beta - 90;
                 const yTilt = gamma;
                 const zRotation = alpha;
@@ -873,15 +894,12 @@
                 axisY.textContent = yTilt.toFixed(1) + '°';
                 axisZ.textContent = zRotation.toFixed(1) + '°';
 
-                // Color-code values
                 colorAxis(axisX, Math.abs(xTilt), 5, 15);
                 colorAxis(axisY, Math.abs(yTilt), 3, 10);
 
-                // Level bubble position: map gamma (-45..+45) to bubble position
                 const bubblePos = 50 + Math.max(-50, Math.min(50, yTilt * (50 / 30)));
                 bubble.style.left = bubblePos + '%';
 
-                // Bubble color
                 const totalTilt = Math.sqrt(xTilt * xTilt + yTilt * yTilt);
                 bubble.classList.remove('warning', 'danger');
                 if (totalTilt > 10) {
