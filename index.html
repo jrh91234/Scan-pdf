@@ -1,1 +1,255 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>PDF Scanner</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="app-header">
+            <h1><i class="fas fa-file-pdf"></i> PDF Scanner</h1>
+            <div class="header-actions">
+                <button id="btnSettings" class="icon-btn" title="Settings">
+                    <i class="fas fa-ellipsis-v"></i>
+                </button>
+            </div>
+        </header>
 
+        <!-- Main View: Page List -->
+        <main id="mainView" class="main-view">
+            <div id="emptyState" class="empty-state">
+                <div class="empty-icon">
+                    <i class="fas fa-camera"></i>
+                </div>
+                <h2>Scan Documents</h2>
+                <p>Take a photo or upload an image to start scanning</p>
+            </div>
+
+            <div id="pageList" class="page-list hidden"></div>
+
+            <!-- Bottom Actions -->
+            <div class="bottom-actions">
+                <button id="btnGallery" class="action-btn secondary" title="Upload from gallery">
+                    <i class="fas fa-images"></i>
+                    <span>Gallery</span>
+                </button>
+                <button id="btnCapture" class="action-btn primary" title="Take photo">
+                    <i class="fas fa-camera"></i>
+                </button>
+                <button id="btnExport" class="action-btn secondary" title="Export PDF" disabled>
+                    <i class="fas fa-file-export"></i>
+                    <span>Export</span>
+                </button>
+            </div>
+        </main>
+
+        <!-- Camera View -->
+        <div id="cameraView" class="camera-view hidden">
+            <div class="camera-header">
+                <button id="btnCameraClose" class="icon-btn light">
+                    <i class="fas fa-times"></i>
+                </button>
+                <span class="camera-title">Scan Document</span>
+                <button id="btnFlash" class="icon-btn light" title="Flash">
+                    <i class="fas fa-bolt"></i>
+                </button>
+            </div>
+            <div class="camera-preview">
+                <video id="cameraFeed" autoplay playsinline></video>
+                <div class="scan-overlay">
+                    <div class="scan-frame"></div>
+                </div>
+            </div>
+            <div class="camera-controls">
+                <button id="btnSwitchCamera" class="icon-btn light" title="Switch camera">
+                    <i class="fas fa-sync-alt"></i>
+                </button>
+                <button id="btnSnap" class="snap-btn" title="Capture">
+                    <div class="snap-inner"></div>
+                </button>
+                <button id="btnBatchMode" class="icon-btn light" title="Batch mode">
+                    <i class="fas fa-layer-group"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Editor View -->
+        <div id="editorView" class="editor-view hidden">
+            <div class="editor-header">
+                <button id="btnEditorBack" class="icon-btn">
+                    <i class="fas fa-arrow-left"></i>
+                </button>
+                <span class="editor-title">Edit Scan</span>
+                <button id="btnEditorDone" class="btn-text">Done</button>
+            </div>
+            <div class="editor-canvas-wrapper">
+                <canvas id="editorCanvas"></canvas>
+            </div>
+            <div class="editor-tools">
+                <div class="filter-bar" id="filterBar">
+                    <button class="filter-btn active" data-filter="original">
+                        <div class="filter-preview original"></div>
+                        <span>Original</span>
+                    </button>
+                    <button class="filter-btn" data-filter="grayscale">
+                        <div class="filter-preview grayscale"></div>
+                        <span>B&W</span>
+                    </button>
+                    <button class="filter-btn" data-filter="enhanced">
+                        <div class="filter-preview enhanced"></div>
+                        <span>Enhanced</span>
+                    </button>
+                    <button class="filter-btn" data-filter="magic">
+                        <div class="filter-preview magic"></div>
+                        <span>Magic</span>
+                    </button>
+                </div>
+                <div class="tool-bar">
+                    <button class="tool-btn" id="btnRotateLeft" title="Rotate left">
+                        <i class="fas fa-undo"></i>
+                        <span>Rotate</span>
+                    </button>
+                    <button class="tool-btn" id="btnCrop" title="Crop">
+                        <i class="fas fa-crop-alt"></i>
+                        <span>Crop</span>
+                    </button>
+                    <button class="tool-btn" id="btnBrightness" title="Brightness">
+                        <i class="fas fa-sun"></i>
+                        <span>Brightness</span>
+                    </button>
+                    <button class="tool-btn" id="btnContrast" title="Contrast">
+                        <i class="fas fa-adjust"></i>
+                        <span>Contrast</span>
+                    </button>
+                </div>
+                <div class="slider-panel hidden" id="sliderPanel">
+                    <div class="slider-header">
+                        <span id="sliderLabel">Brightness</span>
+                        <button id="btnSliderClose" class="icon-btn small"><i class="fas fa-times"></i></button>
+                    </div>
+                    <input type="range" id="adjustSlider" min="-100" max="100" value="0">
+                    <div class="slider-values">
+                        <span>-100</span>
+                        <span id="sliderValue">0</span>
+                        <span>+100</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Export Modal -->
+        <div id="exportModal" class="modal hidden">
+            <div class="modal-overlay"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Export PDF</h3>
+                    <button id="btnModalClose" class="icon-btn"><i class="fas fa-times"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label for="pdfName">File name</label>
+                        <input type="text" id="pdfName" placeholder="Scanned Document" value="Scanned Document">
+                    </div>
+                    <div class="form-group">
+                        <label>Page size</label>
+                        <div class="radio-group">
+                            <label class="radio-option active">
+                                <input type="radio" name="pageSize" value="a4" checked> A4
+                            </label>
+                            <label class="radio-option">
+                                <input type="radio" name="pageSize" value="letter"> Letter
+                            </label>
+                            <label class="radio-option">
+                                <input type="radio" name="pageSize" value="legal"> Legal
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Orientation</label>
+                        <div class="radio-group">
+                            <label class="radio-option active">
+                                <input type="radio" name="orientation" value="portrait" checked> Portrait
+                            </label>
+                            <label class="radio-option">
+                                <input type="radio" name="orientation" value="landscape"> Landscape
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Quality</label>
+                        <div class="radio-group">
+                            <label class="radio-option">
+                                <input type="radio" name="quality" value="low"> Low
+                            </label>
+                            <label class="radio-option active">
+                                <input type="radio" name="quality" value="medium" checked> Medium
+                            </label>
+                            <label class="radio-option">
+                                <input type="radio" name="quality" value="high"> High
+                            </label>
+                        </div>
+                    </div>
+                    <div class="page-count">
+                        <i class="fas fa-file"></i> <span id="exportPageCount">0</span> pages
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button id="btnExportPdf" class="btn-primary">
+                        <i class="fas fa-download"></i> Export PDF
+                    </button>
+                    <button id="btnSharePdf" class="btn-secondary">
+                        <i class="fas fa-share-alt"></i> Share
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Crop Modal -->
+        <div id="cropModal" class="modal hidden">
+            <div class="modal-overlay"></div>
+            <div class="crop-container">
+                <div class="crop-header">
+                    <button id="btnCropCancel" class="btn-text">Cancel</button>
+                    <span>Crop</span>
+                    <button id="btnCropApply" class="btn-text accent">Apply</button>
+                </div>
+                <div class="crop-canvas-wrapper">
+                    <canvas id="cropCanvas"></canvas>
+                    <div id="cropBox" class="crop-box">
+                        <div class="crop-handle top-left"></div>
+                        <div class="crop-handle top-right"></div>
+                        <div class="crop-handle bottom-left"></div>
+                        <div class="crop-handle bottom-right"></div>
+                    </div>
+                </div>
+                <div class="crop-presets">
+                    <button class="preset-btn active" data-ratio="free">Free</button>
+                    <button class="preset-btn" data-ratio="1:1">1:1</button>
+                    <button class="preset-btn" data-ratio="4:3">4:3</button>
+                    <button class="preset-btn" data-ratio="3:4">3:4</button>
+                    <button class="preset-btn" data-ratio="16:9">16:9</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading Overlay -->
+        <div id="loadingOverlay" class="loading-overlay hidden">
+            <div class="spinner"></div>
+            <p id="loadingText">Processing...</p>
+        </div>
+
+        <!-- Toast -->
+        <div id="toast" class="toast hidden"></div>
+
+        <!-- Hidden file input -->
+        <input type="file" id="fileInput" accept="image/*" multiple hidden>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
