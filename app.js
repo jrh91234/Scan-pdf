@@ -233,7 +233,7 @@
         }
     }
 
-    function capturePhoto() {
+    async function capturePhoto() {
         const video = els.cameraFeed;
         if (!video.videoWidth) return;
 
@@ -251,7 +251,7 @@
         const dataURL = canvas.toDataURL('image/jpeg', 0.92);
 
         if (state.batchMode) {
-            addPage(dataURL);
+            await addPage(dataURL);
             showToast(`Page ${state.pages.length} added`);
         } else {
             closeCamera();
@@ -281,10 +281,10 @@
             }
 
             const reader = new FileReader();
-            reader.onload = (e) => {
+            reader.onload = async (e) => {
                 processed++;
                 if (fileArray.length > 1) {
-                    addPage(e.target.result);
+                    await addPage(e.target.result);
                     els.loadingText.textContent = `Processing ${processed}/${fileArray.length}...`;
                     if (processed === fileArray.length) {
                         hideLoading();
@@ -303,31 +303,34 @@
     }
 
     function addPage(dataURL) {
-        const thumbCanvas = document.createElement('canvas');
-        const thumbSize = 300;
-        const img = new Image();
-        img.onload = () => {
-            const ratio = img.width / img.height;
-            if (ratio > 1) {
-                thumbCanvas.width = thumbSize;
-                thumbCanvas.height = thumbSize / ratio;
-            } else {
-                thumbCanvas.height = thumbSize;
-                thumbCanvas.width = thumbSize * ratio;
-            }
-            thumbCanvas.getContext('2d').drawImage(img, 0, 0, thumbCanvas.width, thumbCanvas.height);
+        return new Promise((resolve) => {
+            const thumbCanvas = document.createElement('canvas');
+            const thumbSize = 300;
+            const img = new Image();
+            img.onload = () => {
+                const ratio = img.width / img.height;
+                if (ratio > 1) {
+                    thumbCanvas.width = thumbSize;
+                    thumbCanvas.height = thumbSize / ratio;
+                } else {
+                    thumbCanvas.height = thumbSize;
+                    thumbCanvas.width = thumbSize * ratio;
+                }
+                thumbCanvas.getContext('2d').drawImage(img, 0, 0, thumbCanvas.width, thumbCanvas.height);
 
-            state.pages.push({
-                fullImage: dataURL,
-                thumbnail: thumbCanvas.toDataURL('image/jpeg', 0.7),
-                filter: 'original',
-                brightness: 0,
-                contrast: 0,
-                rotation: 0,
-            });
-            updateUI();
-        };
-        img.src = dataURL;
+                state.pages.push({
+                    fullImage: dataURL,
+                    thumbnail: thumbCanvas.toDataURL('image/jpeg', 0.7),
+                    filter: 'original',
+                    brightness: 0,
+                    contrast: 0,
+                    rotation: 0,
+                });
+                updateUI();
+                resolve();
+            };
+            img.src = dataURL;
+        });
     }
 
     // ==================== Editor ====================
@@ -462,7 +465,7 @@
         ctx.putImageData(imageData, 0, 0);
     }
 
-    function saveEditorResult() {
+    async function saveEditorResult() {
         const canvas = els.editorCanvas;
         const dataURL = canvas.toDataURL('image/jpeg', 0.92);
 
@@ -474,7 +477,6 @@
             page.contrast = state.contrast;
             page.rotation = state.rotation;
 
-            // Update thumbnail
             const thumbCanvas = document.createElement('canvas');
             const thumbSize = 300;
             const ratio = canvas.width / canvas.height;
@@ -488,7 +490,7 @@
             thumbCanvas.getContext('2d').drawImage(canvas, 0, 0, thumbCanvas.width, thumbCanvas.height);
             page.thumbnail = thumbCanvas.toDataURL('image/jpeg', 0.7);
         } else {
-            addPage(dataURL);
+            await addPage(dataURL);
         }
 
         els.editorView.classList.add('hidden');
@@ -708,7 +710,19 @@
                 const x = margin + (availW - drawW) / 2;
                 const y = margin + (availH - drawH) / 2;
 
-                pdf.addImage(state.pages[i].fullImage, 'JPEG', x, y, drawW, drawH, undefined, 'FAST', 0);
+                // Resize image for PDF to avoid memory issues with very large images
+                const maxDim = quality === 'high' ? 3000 : quality === 'medium' ? 2000 : 1200;
+                let imgData = state.pages[i].fullImage;
+                if (img.width > maxDim || img.height > maxDim) {
+                    const scale = maxDim / Math.max(img.width, img.height);
+                    const tmpCanvas = document.createElement('canvas');
+                    tmpCanvas.width = Math.round(img.width * scale);
+                    tmpCanvas.height = Math.round(img.height * scale);
+                    tmpCanvas.getContext('2d').drawImage(img, 0, 0, tmpCanvas.width, tmpCanvas.height);
+                    imgData = tmpCanvas.toDataURL('image/jpeg', jpegQuality);
+                }
+
+                pdf.addImage(imgData, 'JPEG', x, y, drawW, drawH, undefined, 'FAST', 0);
             }
 
             pdf.save(`${name}.pdf`);
@@ -847,8 +861,10 @@
 
     // Export modal
     $('#btnModalClose').addEventListener('click', () => els.exportModal.classList.add('hidden'));
-    $('.modal-overlay').addEventListener('click', function() {
-        this.closest('.modal').classList.add('hidden');
+    $$('.modal-overlay').forEach(overlay => {
+        overlay.addEventListener('click', function() {
+            this.closest('.modal').classList.add('hidden');
+        });
     });
 
     $$('.radio-option').forEach(opt => {
