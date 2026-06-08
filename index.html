@@ -153,6 +153,10 @@
                         <i class="fas fa-magic"></i>
                         <span>Straighten</span>
                     </button>
+                    <button class="tool-btn" id="btnPerspective" title="Perspective">
+                        <i class="fas fa-vector-square"></i>
+                        <span>Perspective</span>
+                    </button>
                     <button class="tool-btn" id="btnRotateLeft" title="Rotate left">
                         <i class="fas fa-undo"></i>
                         <span>Rotate</span>
@@ -276,6 +280,40 @@
                     <button class="preset-btn" data-ratio="4:3">4:3</button>
                     <button class="preset-btn" data-ratio="3:4">3:4</button>
                     <button class="preset-btn" data-ratio="16:9">16:9</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Perspective Modal -->
+        <div id="perspectiveModal" class="modal hidden">
+            <div class="modal-overlay"></div>
+            <div class="perspective-container">
+                <div class="perspective-header">
+                    <button id="btnPerspCancel" class="btn-text">Cancel</button>
+                    <div class="perspective-title-group">
+                        <span>Perspective</span>
+                        <button id="btnPerspAutoDetect" class="btn-small-action">
+                            <i class="fas fa-crosshairs"></i> Auto Detect
+                        </button>
+                    </div>
+                    <button id="btnPerspApply" class="btn-text accent">Apply</button>
+                </div>
+                <div class="perspective-canvas-wrapper" id="perspectiveWrapper">
+                    <canvas id="perspectiveCanvas"></canvas>
+                    <svg id="perspectiveSvg" class="perspective-svg">
+                        <polygon id="perspPoly" class="persp-polygon"/>
+                        <line id="perspLine0" class="persp-line"/>
+                        <line id="perspLine1" class="persp-line"/>
+                        <line id="perspLine2" class="persp-line"/>
+                        <line id="perspLine3" class="persp-line"/>
+                        <circle id="perspPt0" class="persp-point" r="14"/>
+                        <circle id="perspPt1" class="persp-point" r="14"/>
+                        <circle id="perspPt2" class="persp-point" r="14"/>
+                        <circle id="perspPt3" class="persp-point" r="14"/>
+                    </svg>
+                </div>
+                <div class="perspective-hint">
+                    <i class="fas fa-hand-pointer"></i> Drag corners to match document edges
                 </div>
             </div>
         </div>
