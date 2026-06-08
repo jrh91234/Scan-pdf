@@ -843,6 +843,458 @@
         }
     }
 
+    // ==================== Perspective Correction ====================
+
+    let perspCorners = []; // 4 corners in display coords [{x,y}, ...]
+    let perspCanvasOffset = { x: 0, y: 0 };
+    let perspScale = 1;
+    let perspDragging = -1;
+
+    function openPerspective() {
+        const modal = $('#perspectiveModal');
+        modal.classList.remove('hidden');
+
+        const canvas = $('#perspectiveCanvas');
+        const ctx = canvas.getContext('2d');
+        const srcCanvas = els.editorCanvas;
+        const wrapper = $('#perspectiveWrapper');
+
+        const maxW = wrapper.clientWidth - 40;
+        const maxH = wrapper.clientHeight - 40;
+        perspScale = Math.min(maxW / srcCanvas.width, maxH / srcCanvas.height, 1);
+
+        canvas.width = Math.round(srcCanvas.width * perspScale);
+        canvas.height = Math.round(srcCanvas.height * perspScale);
+        ctx.drawImage(srcCanvas, 0, 0, canvas.width, canvas.height);
+
+        // Position SVG overlay to match canvas
+        requestAnimationFrame(() => {
+            const rect = canvas.getBoundingClientRect();
+            const wrapperRect = wrapper.getBoundingClientRect();
+            perspCanvasOffset = {
+                x: rect.left - wrapperRect.left,
+                y: rect.top - wrapperRect.top,
+            };
+
+            // Default corners: 10% inset
+            const inset = 0.1;
+            perspCorners = [
+                { x: canvas.width * inset, y: canvas.height * inset },                    // top-left
+                { x: canvas.width * (1 - inset), y: canvas.height * inset },              // top-right
+                { x: canvas.width * (1 - inset), y: canvas.height * (1 - inset) },        // bottom-right
+                { x: canvas.width * inset, y: canvas.height * (1 - inset) },              // bottom-left
+            ];
+            updatePerspectiveOverlay();
+        });
+    }
+
+    function updatePerspectiveOverlay() {
+        const ox = perspCanvasOffset.x;
+        const oy = perspCanvasOffset.y;
+        const c = perspCorners;
+
+        const poly = $('#perspPoly');
+        poly.setAttribute('points', c.map(p => `${ox + p.x},${oy + p.y}`).join(' '));
+
+        for (let i = 0; i < 4; i++) {
+            const next = (i + 1) % 4;
+            const line = $(`#perspLine${i}`);
+            line.setAttribute('x1', ox + c[i].x);
+            line.setAttribute('y1', oy + c[i].y);
+            line.setAttribute('x2', ox + c[next].x);
+            line.setAttribute('y2', oy + c[next].y);
+
+            const pt = $(`#perspPt${i}`);
+            pt.setAttribute('cx', ox + c[i].x);
+            pt.setAttribute('cy', oy + c[i].y);
+        }
+    }
+
+    function initPerspectiveHandlers() {
+        const svg = $('#perspectiveSvg');
+
+        function getPos(e) {
+            const touch = e.touches ? e.touches[0] : e;
+            return { x: touch.clientX, y: touch.clientY };
+        }
+
+        for (let i = 0; i < 4; i++) {
+            const pt = $(`#perspPt${i}`);
+            const start = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                perspDragging = i;
+                pt.classList.add('active-drag');
+            };
+            pt.addEventListener('mousedown', start);
+            pt.addEventListener('touchstart', start, { passive: false });
+        }
+
+        function onMove(e) {
+            if (perspDragging < 0) return;
+            e.preventDefault();
+            const pos = getPos(e);
+            const wrapper = $('#perspectiveWrapper');
+            const wrapperRect = wrapper.getBoundingClientRect();
+            const canvas = $('#perspectiveCanvas');
+
+            let x = pos.x - wrapperRect.left - perspCanvasOffset.x;
+            let y = pos.y - wrapperRect.top - perspCanvasOffset.y;
+            x = Math.max(0, Math.min(canvas.width, x));
+            y = Math.max(0, Math.min(canvas.height, y));
+
+            perspCorners[perspDragging] = { x, y };
+            updatePerspectiveOverlay();
+        }
+
+        function onEnd() {
+            if (perspDragging >= 0) {
+                $(`#perspPt${perspDragging}`).classList.remove('active-drag');
+            }
+            perspDragging = -1;
+        }
+
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('mouseup', onEnd);
+        document.addEventListener('touchend', onEnd);
+    }
+
+    // Auto-detect document edges
+    async function autoDetectEdges() {
+        showLoading('Detecting edges...');
+        await new Promise(r => setTimeout(r, 50));
+
+        try {
+            const canvas = $('#perspectiveCanvas');
+            const w = canvas.width;
+            const h = canvas.height;
+            const ctx = canvas.getContext('2d');
+            const imageData = ctx.getImageData(0, 0, w, h);
+            const data = imageData.data;
+
+            // Grayscale
+            const gray = new Float32Array(w * h);
+            for (let i = 0; i < gray.length; i++) {
+                const idx = i * 4;
+                gray[i] = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+            }
+
+            // Gaussian blur
+            const blurred = gaussianBlur(gray, w, h);
+
+            // Sobel edges
+            const edgeMag = new Float32Array(w * h);
+            for (let y = 1; y < h - 1; y++) {
+                for (let x = 1; x < w - 1; x++) {
+                    const gx = -blurred[(y-1)*w+(x-1)] + blurred[(y-1)*w+(x+1)]
+                             - 2*blurred[y*w+(x-1)] + 2*blurred[y*w+(x+1)]
+                             - blurred[(y+1)*w+(x-1)] + blurred[(y+1)*w+(x+1)];
+                    const gy = -blurred[(y-1)*w+(x-1)] - 2*blurred[(y-1)*w+x] - blurred[(y-1)*w+(x+1)]
+                             + blurred[(y+1)*w+(x-1)] + 2*blurred[(y+1)*w+x] + blurred[(y+1)*w+(x+1)];
+                    edgeMag[y * w + x] = Math.sqrt(gx * gx + gy * gy);
+                }
+            }
+
+            // Threshold
+            let maxEdge = 0;
+            for (let i = 0; i < edgeMag.length; i++) if (edgeMag[i] > maxEdge) maxEdge = edgeMag[i];
+            const threshold = maxEdge * 0.15;
+
+            // Collect strong edge points
+            const edgePts = [];
+            for (let y = 2; y < h - 2; y += 2) {
+                for (let x = 2; x < w - 2; x += 2) {
+                    if (edgeMag[y * w + x] > threshold) {
+                        edgePts.push({ x, y });
+                    }
+                }
+            }
+
+            if (edgePts.length < 40) {
+                hideLoading();
+                showToast('Could not detect document edges');
+                return;
+            }
+
+            // Find document contour using convex hull then approximate to quadrilateral
+            // First, find the largest rectangular-ish region using scan from 4 sides
+            const found = findDocumentQuad(edgePts, w, h);
+
+            if (found) {
+                perspCorners = found;
+                updatePerspectiveOverlay();
+                hideLoading();
+                showToast('Edges detected — adjust if needed');
+            } else {
+                hideLoading();
+                showToast('Could not detect document edges');
+            }
+        } catch (err) {
+            hideLoading();
+            showToast('Edge detection failed');
+            console.error(err);
+        }
+    }
+
+    function findDocumentQuad(edgePts, w, h) {
+        // Divide image into quadrants and find extreme edge points
+        const cx = w / 2;
+        const cy = h / 2;
+        const margin = Math.min(w, h) * 0.02;
+
+        // For each corner region, find the point closest to that corner
+        // with strong edge presence nearby
+        const regions = [
+            { corner: { x: 0, y: 0 }, pts: [] },         // top-left
+            { corner: { x: w, y: 0 }, pts: [] },          // top-right
+            { corner: { x: w, y: h }, pts: [] },           // bottom-right
+            { corner: { x: 0, y: h }, pts: [] },           // bottom-left
+        ];
+
+        for (const p of edgePts) {
+            if (p.x < cx && p.y < cy) regions[0].pts.push(p);
+            else if (p.x >= cx && p.y < cy) regions[1].pts.push(p);
+            else if (p.x >= cx && p.y >= cy) regions[2].pts.push(p);
+            else regions[3].pts.push(p);
+        }
+
+        // For each corner: find the outermost edge point (maximize distance from center)
+        const corners = [];
+        for (let i = 0; i < 4; i++) {
+            const region = regions[i];
+            if (region.pts.length < 5) return null;
+
+            const cx2 = w / 2;
+            const cy2 = h / 2;
+            let bestPt = null;
+            let bestDist = 0;
+
+            for (const p of region.pts) {
+                const dist = Math.sqrt((p.x - cx2) ** 2 + (p.y - cy2) ** 2);
+                if (dist > bestDist) {
+                    bestDist = dist;
+                    bestPt = p;
+                }
+            }
+
+            if (!bestPt) return null;
+
+            // Refine: average nearby edge points to smooth the corner position
+            const radius = Math.min(w, h) * 0.08;
+            let sumX = 0, sumY = 0, count = 0;
+            for (const p of region.pts) {
+                const d = Math.sqrt((p.x - bestPt.x) ** 2 + (p.y - bestPt.y) ** 2);
+                if (d < radius) {
+                    const weight = 1 / (1 + d);
+                    sumX += p.x * weight;
+                    sumY += p.y * weight;
+                    count += weight;
+                }
+            }
+            corners.push({
+                x: Math.max(margin, Math.min(w - margin, sumX / count)),
+                y: Math.max(margin, Math.min(h - margin, sumY / count)),
+            });
+        }
+
+        // Validate: should form a convex quadrilateral
+        if (!isConvexQuad(corners)) return null;
+
+        // Validate: area should be at least 10% of the image
+        const area = quadArea(corners);
+        if (area < w * h * 0.1) return null;
+
+        return corners;
+    }
+
+    function isConvexQuad(pts) {
+        for (let i = 0; i < 4; i++) {
+            const a = pts[i];
+            const b = pts[(i + 1) % 4];
+            const c = pts[(i + 2) % 4];
+            const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+            if (cross < 0) return false;
+        }
+        return true;
+    }
+
+    function quadArea(pts) {
+        let area = 0;
+        for (let i = 0; i < 4; i++) {
+            const j = (i + 1) % 4;
+            area += pts[i].x * pts[j].y;
+            area -= pts[j].x * pts[i].y;
+        }
+        return Math.abs(area) / 2;
+    }
+
+    // Perspective transform using bilinear interpolation
+    function applyPerspectiveTransform(srcCanvas, corners) {
+        const sw = srcCanvas.width;
+        const sh = srcCanvas.height;
+        const srcCtx = srcCanvas.getContext('2d');
+        const srcData = srcCtx.getImageData(0, 0, sw, sh);
+        const src = srcData.data;
+
+        // Convert display corners to original image coords
+        const origCorners = corners.map(c => ({
+            x: c.x / perspScale,
+            y: c.y / perspScale,
+        }));
+
+        // Determine output size from the longest edges
+        const topW = Math.sqrt((origCorners[1].x - origCorners[0].x) ** 2 + (origCorners[1].y - origCorners[0].y) ** 2);
+        const botW = Math.sqrt((origCorners[2].x - origCorners[3].x) ** 2 + (origCorners[2].y - origCorners[3].y) ** 2);
+        const leftH = Math.sqrt((origCorners[3].x - origCorners[0].x) ** 2 + (origCorners[3].y - origCorners[0].y) ** 2);
+        const rightH = Math.sqrt((origCorners[2].x - origCorners[1].x) ** 2 + (origCorners[2].y - origCorners[1].y) ** 2);
+
+        const dw = Math.round(Math.max(topW, botW));
+        const dh = Math.round(Math.max(leftH, rightH));
+
+        if (dw < 10 || dh < 10) return null;
+
+        // Compute 3x3 homography matrix
+        const H = computeHomography(
+            origCorners[0], origCorners[1], origCorners[2], origCorners[3],
+            { x: 0, y: 0 }, { x: dw, y: 0 }, { x: dw, y: dh }, { x: 0, y: dh }
+        );
+
+        if (!H) return null;
+
+        const dstCanvas = document.createElement('canvas');
+        dstCanvas.width = dw;
+        dstCanvas.height = dh;
+        const dstCtx = dstCanvas.getContext('2d');
+        const dstData = dstCtx.createImageData(dw, dh);
+        const dst = dstData.data;
+
+        // Inverse mapping: for each destination pixel, find source pixel
+        for (let dy = 0; dy < dh; dy++) {
+            for (let dx = 0; dx < dw; dx++) {
+                // Apply inverse homography
+                const denom = H[6] * dx + H[7] * dy + H[8];
+                if (Math.abs(denom) < 1e-10) continue;
+                const sx = (H[0] * dx + H[1] * dy + H[2]) / denom;
+                const sy = (H[3] * dx + H[4] * dy + H[5]) / denom;
+
+                // Bilinear interpolation
+                const x0 = Math.floor(sx);
+                const y0 = Math.floor(sy);
+                const x1 = x0 + 1;
+                const y1 = y0 + 1;
+
+                if (x0 < 0 || y0 < 0 || x1 >= sw || y1 >= sh) continue;
+
+                const fx = sx - x0;
+                const fy = sy - y0;
+                const w00 = (1 - fx) * (1 - fy);
+                const w10 = fx * (1 - fy);
+                const w01 = (1 - fx) * fy;
+                const w11 = fx * fy;
+
+                const i00 = (y0 * sw + x0) * 4;
+                const i10 = (y0 * sw + x1) * 4;
+                const i01 = (y1 * sw + x0) * 4;
+                const i11 = (y1 * sw + x1) * 4;
+                const di = (dy * dw + dx) * 4;
+
+                dst[di]     = src[i00]     * w00 + src[i10]     * w10 + src[i01]     * w01 + src[i11]     * w11;
+                dst[di + 1] = src[i00 + 1] * w00 + src[i10 + 1] * w10 + src[i01 + 1] * w01 + src[i11 + 1] * w11;
+                dst[di + 2] = src[i00 + 2] * w00 + src[i10 + 2] * w10 + src[i01 + 2] * w01 + src[i11 + 2] * w11;
+                dst[di + 3] = 255;
+            }
+        }
+
+        dstCtx.putImageData(dstData, 0, 0);
+        return dstCanvas;
+    }
+
+    // Compute 3x3 homography from 4 source points to 4 destination points
+    function computeHomography(s0, s1, s2, s3, d0, d1, d2, d3) {
+        const srcPts = [s0, s1, s2, s3];
+        const dstPts = [d0, d1, d2, d3];
+
+        // Build 8x8 matrix for solving Ah = b
+        const A = [];
+        const b = [];
+        for (let i = 0; i < 4; i++) {
+            const sx = srcPts[i].x, sy = srcPts[i].y;
+            const dx = dstPts[i].x, dy = dstPts[i].y;
+            A.push([dx, dy, 1, 0, 0, 0, -sx * dx, -sx * dy]);
+            b.push(sx);
+            A.push([0, 0, 0, dx, dy, 1, -sy * dx, -sy * dy]);
+            b.push(sy);
+        }
+
+        // Gaussian elimination
+        const n = 8;
+        const M = A.map((row, i) => [...row, b[i]]);
+
+        for (let col = 0; col < n; col++) {
+            let maxRow = col;
+            for (let row = col + 1; row < n; row++) {
+                if (Math.abs(M[row][col]) > Math.abs(M[maxRow][col])) maxRow = row;
+            }
+            [M[col], M[maxRow]] = [M[maxRow], M[col]];
+
+            if (Math.abs(M[col][col]) < 1e-10) return null;
+
+            for (let row = col + 1; row < n; row++) {
+                const factor = M[row][col] / M[col][col];
+                for (let j = col; j <= n; j++) {
+                    M[row][j] -= factor * M[col][j];
+                }
+            }
+        }
+
+        // Back substitution
+        const h = new Array(n);
+        for (let i = n - 1; i >= 0; i--) {
+            h[i] = M[i][n];
+            for (let j = i + 1; j < n; j++) {
+                h[i] -= M[i][j] * h[j];
+            }
+            h[i] /= M[i][i];
+        }
+
+        // 3x3 matrix (h8 = 1)
+        return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+    }
+
+    async function applyPerspective() {
+        showLoading('Applying perspective correction...');
+        await new Promise(r => setTimeout(r, 50));
+
+        try {
+            const img = await loadImage(state.originalImage);
+            const srcCanvas = document.createElement('canvas');
+            srcCanvas.width = img.width;
+            srcCanvas.height = img.height;
+            srcCanvas.getContext('2d').drawImage(img, 0, 0);
+
+            const result = applyPerspectiveTransform(srcCanvas, perspCorners);
+
+            if (!result) {
+                hideLoading();
+                showToast('Invalid corner selection');
+                return;
+            }
+
+            state.originalImage = result.toDataURL('image/jpeg', 0.95);
+            state.rotation = 0;
+
+            $('#perspectiveModal').classList.add('hidden');
+            hideLoading();
+            renderEditor();
+            showToast('Perspective corrected');
+        } catch (err) {
+            hideLoading();
+            showToast('Perspective correction failed');
+            console.error(err);
+        }
+    }
+
     // ==================== Orientation Sensor ====================
 
     let orientationHandler = null;
@@ -1229,6 +1681,11 @@
 
     // Tools
     $('#btnDeskew').addEventListener('click', autoDeskew);
+    $('#btnPerspective').addEventListener('click', openPerspective);
+    $('#btnPerspCancel').addEventListener('click', () => $('#perspectiveModal').classList.add('hidden'));
+    $('#btnPerspApply').addEventListener('click', applyPerspective);
+    $('#btnPerspAutoDetect').addEventListener('click', autoDetectEdges);
+    initPerspectiveHandlers();
 
     $('#btnRotateLeft').addEventListener('click', () => {
         state.rotation = (state.rotation - 90 + 360) % 360;
